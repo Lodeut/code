@@ -1,0 +1,177 @@
+import os
+import numpy as np
+import matplotlib.pyplot as plt
+import pandas as pd
+import scipy as sp
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.nn.functional as F
+import torchvision.datasets as datasets
+import torchvision.transforms as transforms
+from torch.utils.data import Dataset
+from torch.utils.data import DataLoader
+import torchvision
+import random
+from torchvision.io import read_image
+from skimage import io
+from sklearn.metrics import confusion_matrix
+import seaborn as sn
+
+device =torch.device('cuda'if torch.cuda.is_available() else'cpu')
+
+
+in_channel = 1
+num_Classes = 6
+batch_size = 16
+num_epochs = 20
+learning_rate = 0.001
+
+y_pred = []
+y_true = []
+
+## train & valid dataset
+class myaoidataset(Dataset):
+    def __init__(self, csv_file, root_dir,transform=None):
+        self.annotations = pd.read_csv(csv_file)
+        self.root_dir = root_dir
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.annotations)
+    
+    def __getitem__(self,index):
+        img_path =os.path.join(self.root_dir,self.annotations.iloc[index,0])
+        image =io.imread(img_path)
+        y_label = torch.tensor(int(self.annotations.iloc[index,1]))
+
+        if self.transform:
+            image = self.transform(image)
+        
+        return (image,y_label)
+
+## test dataset
+class testdataset(Dataset):
+    def __init__(self, csv_file, root_dir,transform=None):
+        self.annotations = pd.read_csv(csv_file)
+        self.root_dir = root_dir
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.annotations)
+    
+    def __getitem__(self,index):
+        img_path =os.path.join(self.root_dir,self.annotations.iloc[index,0])
+        image =io.imread(img_path)
+        
+
+        if self.transform:
+            image = self.transform(image)
+        
+        return (image)
+##train&valid dataset
+dataset=myaoidataset(csv_file= 'C:/Dataset/AOI/train.csv',root_dir = 'C:/Dataset/AOI/train_images/',transform= transforms.ToTensor())
+train_set,valid_set = torch.utils.data.random_split(dataset,[2000,528])
+train_loader =  DataLoader(dataset=train_set,batch_size=batch_size,shuffle=True)
+valid_loader =  DataLoader(dataset=valid_set,batch_size=batch_size,shuffle=True)
+##test dataset
+test_dataset=testdataset(csv_file= 'C:/Dataset/AOI/test.csv',root_dir = 'C:/Dataset/AOI/test_images/',transform= transforms.ToTensor())
+test_loader = DataLoader(test_dataset,batch_size=batch_size,shuffle=False)
+
+##model
+class ConvNet(nn.Module):
+    def __init__(self, num_classes=6):
+        super(ConvNet, self).__init__()
+        self.layer1 = nn.Sequential(
+            nn.Conv2d(1, 16, kernel_size=5, stride=1, padding=2),
+            nn.BatchNorm2d(16),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2, stride=2))
+        self.layer2 = nn.Sequential(
+            nn.Conv2d(16, 32, kernel_size=5, stride=1, padding=2),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2, stride=2))
+        self.fc = nn.Linear(128*128*32, num_classes)
+        
+    def forward(self, x):
+        out = self.layer1(x)
+        out = self.layer2(out)
+        out = out.reshape(out.size(0), -1)
+        out = self.fc(out)
+        return out
+
+model = ConvNet(num_Classes).to(device)
+
+# Loss and optimizer
+criterion = nn.CrossEntropyLoss()
+optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+
+# Train the model
+total_step = len(train_loader)
+for epoch in range(num_epochs):
+    for i, (images, labels) in enumerate(train_loader):
+        images = images.to(device)
+        labels = labels.to(device)
+        
+        # Forward pass
+        outputs = model(images)
+        loss = criterion(outputs, labels)
+        
+        # Backward and optimize
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        
+        if (i+1) % 25 == 0:
+            print ('Epoch [{}/{}], Step [{}/{}], Loss: {:.4f}' 
+                   .format(epoch+1, num_epochs, i+1, total_step, loss.item()))
+
+# valid the model
+model.eval()  # eval mode (batchnorm uses moving mean/variance instead of mini-batch mean/variance)
+with torch.no_grad():
+    correct = 0
+    total = 0
+    for images, labels in valid_loader:
+        images = images.to(device)
+        labels = labels.to(device)
+        outputs = model(images)
+        _, predicted = torch.max(outputs.data, 1)
+        total += labels.size(0)
+        correct += (predicted == labels).sum().item()
+        outputs = (torch.max(torch.exp(outputs), 1)[1]).data.cpu().numpy()
+        y_pred.extend(outputs) # Save Prediction
+        labels = labels.data.cpu().numpy()
+        y_true.extend(labels) # Save Truth
+
+    classes = ('0=normal', '1=void', '2=horizontal defect', '3=vertical defect', '4=edge defect', '5=particle')
+    print('Accuracy of the model on the 528 valid images: {} %'.format(100 * correct / total))
+    cf_matrix = confusion_matrix(y_true, y_pred)
+    df_cm = pd.DataFrame(cf_matrix, index = [i for i in classes], columns = [i for i in classes])
+    plt.figure(figsize = (9,6))
+    sn.heatmap(df_cm,cmap="YlGnBu",annot=True)
+    plt.savefig('valid_result.png')
+
+   
+# Save the model checkpoint
+torch.save(model.state_dict(), 'model.ckpt')
+
+"""
+##test the model
+test_predict = []
+model.eval()
+with torch.no_grad():
+    for images in test_loader:
+        images = images.cuda()
+        
+        out = model(images)  # forward
+        _, pred = torch.max(out.data, 1)
+        test_predict += pred.cpu().numpy().tolist()
+df_submit = pd.DataFrame({'Label': test_predict})
+
+df_submit.to_csv('C:/Dataset/AOI/test.csv',
+                header=True,
+                sep=',',
+                encoding='utf-8',
+                index=False)
+"""
